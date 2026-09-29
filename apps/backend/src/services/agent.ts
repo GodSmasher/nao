@@ -483,9 +483,6 @@ class AgentManager {
 				});
 			},
 			onCompactionFinished: (result) => {
-				if (result.summary.trim() === '') {
-					return;
-				}
 				this._streamWriter?.write({
 					type: 'data-compaction',
 					data: result,

@@ -191,6 +191,24 @@ describe('compactionService.useLastCompaction', () => {
 		expect(result).toHaveLength(6);
 	});
 
+	it('tolerates a null summary from a legacy DB row and skips it', () => {
+		const messages: UIMessage[] = [
+			{ id: '1', role: 'user', parts: [{ type: 'text', text: 'Question' }] },
+			{
+				id: '2',
+				role: 'assistant',
+				parts: [
+					{ type: 'data-compaction', data: { summary: null as unknown as string } },
+					{ type: 'text', text: 'Answer' },
+				],
+			},
+			{ id: '3', role: 'user', parts: [{ type: 'text', text: 'Next question' }] },
+		];
+
+		const result = compactionService.useLastCompaction(messages);
+		expect(result).toBe(messages);
+	});
+
 	it('returns messages unchanged when the only compaction has a blank summary', () => {
 		const messages: UIMessage[] = [
 			{ id: '1', role: 'user', parts: [{ type: 'text', text: 'Question' }] },
