@@ -1390,7 +1390,10 @@ export class ProjectSlackBot {
 			return;
 		}
 		state.renderedToolCallIds.add(part.toolCallId);
-		const storyUrl = new URL(`stories/preview/${ctx.chatId}/${part.output.id}`, this._redirectUrl).toString();
+		const storyUrl = new URL(
+			`stories/preview/${encodeURIComponent(ctx.chatId)}/${encodeURIComponent(part.output.id)}`,
+			this._redirectUrl,
+		).toString();
 		this._closeCurrentTextRun(ctx);
 		ctx.blocks.push(...createStoryLinkCard(part.output.title, storyUrl));
 		await this._editConversationCard(ctx, ctx.blocks);
