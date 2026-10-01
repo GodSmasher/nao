@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 
 import type { ModelMessage } from 'ai';
 
+const PROVIDER_SAFE_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const TOOL_CALL_ID_MAX_LENGTH = 64;
-const TOOL_CALL_ID_SAFE_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const TOOL_CALL_ID_HASH_LENGTH = 8;
+const TOOL_NAME_MAX_LENGTH = 64;
+const TOOL_NAME_HASH_LENGTH = 8;
 
 /**
  * Rewrites tool call ids so they satisfy the strictest provider constraints (Anthropic's `^[a-zA-Z0-9_-]+$`,
@@ -27,13 +29,44 @@ export function sanitizeToolCallIds(messages: ModelMessage[]): ModelMessage[] {
 }
 
 export function toProviderSafeToolCallId(toolCallId: string): string {
-	if (TOOL_CALL_ID_SAFE_PATTERN.test(toolCallId) && toolCallId.length <= TOOL_CALL_ID_MAX_LENGTH) {
+	if (PROVIDER_SAFE_PATTERN.test(toolCallId) && toolCallId.length <= TOOL_CALL_ID_MAX_LENGTH) {
 		return toolCallId;
 	}
 	const hash = createHash('sha1').update(toolCallId).digest('hex').slice(0, TOOL_CALL_ID_HASH_LENGTH);
 	const cleaned = toolCallId
 		.replace(/[^a-zA-Z0-9_-]/g, '_')
 		.slice(0, TOOL_CALL_ID_MAX_LENGTH - TOOL_CALL_ID_HASH_LENGTH - 1);
+	return `${cleaned}_${hash}`;
+}
+
+/**
+ * Rewrites tool names so they satisfy OpenAI's and Anthropic's `^[a-zA-Z0-9_-]+$` and 64-char
+ * limit. MCP tools can carry server-prefixed names like `my.server__list-dashboards` whose dots
+ * (or other non-matching chars from a server-chosen alias) break the request. The mapping is
+ * deterministic so a tool-call part and its matching tool-result part always resolve to the same
+ * sanitized name.
+ */
+export function sanitizeToolNames(messages: ModelMessage[]): ModelMessage[] {
+	return messages.map((message) => {
+		if (!Array.isArray(message.content)) {
+			return message;
+		}
+		const content = message.content.map((part) => {
+			if (!('toolName' in part) || typeof part.toolName !== 'string') {
+				return part;
+			}
+			return { ...part, toolName: toProviderSafeToolName(part.toolName) };
+		});
+		return { ...message, content } as ModelMessage;
+	});
+}
+
+export function toProviderSafeToolName(toolName: string): string {
+	if (PROVIDER_SAFE_PATTERN.test(toolName) && toolName.length <= TOOL_NAME_MAX_LENGTH) {
+		return toolName;
+	}
+	const hash = createHash('sha1').update(toolName).digest('hex').slice(0, TOOL_NAME_HASH_LENGTH);
+	const cleaned = toolName.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, TOOL_NAME_MAX_LENGTH - TOOL_NAME_HASH_LENGTH - 1);
 	return `${cleaned}_${hash}`;
 }
 

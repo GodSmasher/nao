@@ -64,7 +64,7 @@ import {
 	resolveProviderSettings,
 } from '../utils/llm';
 import { logger } from '../utils/logger';
-import { sanitizeToolCallIds } from '../utils/model-message';
+import { sanitizeToolCallIds, sanitizeToolNames } from '../utils/model-message';
 import { extractConfiguredDatabases, readProjectContext } from '../utils/nao-config';
 import { addPromptCache, cachedSystemInstructions } from '../utils/prompt-cache';
 import { scheduleSaveLlmInferenceRecord } from '../utils/schedule-task';
@@ -623,7 +623,7 @@ class AgentManager {
 			tools: this._agentTools,
 		});
 
-		return sanitizeToolCallIds(modelMessages);
+		return sanitizeToolNames(sanitizeToolCallIds(modelMessages));
 	}
 
 	private async _buildSystemPrompt(provider?: Provider, timezone?: string, chatUrl?: string): Promise<string> {

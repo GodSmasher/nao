@@ -1,7 +1,12 @@
 import type { ModelMessage } from 'ai';
 import { describe, expect, it } from 'vitest';
 
-import { sanitizeToolCallIds, toProviderSafeToolCallId } from '../src/utils/model-message';
+import {
+	sanitizeToolCallIds,
+	sanitizeToolNames,
+	toProviderSafeToolCallId,
+	toProviderSafeToolName,
+} from '../src/utils/model-message';
 
 const SAFE_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const NAMESPACED_ID = '3f0d9a3e-6f1a-4b8e-9d2c-1a2b3c4d5e6f:functions.get_automation_run_history:0';
@@ -66,5 +71,66 @@ describe('sanitizeToolCallIds', () => {
 		expect(callId).toMatch(SAFE_PATTERN);
 		expect(callId.length).toBeLessThanOrEqual(64);
 		expect(resultId).toBe(callId);
+	});
+});
+
+describe('toProviderSafeToolName', () => {
+	it('keeps built-in tool names untouched', () => {
+		expect(toProviderSafeToolName('execute_sql')).toBe('execute_sql');
+		expect(toProviderSafeToolName('display_chart')).toBe('display_chart');
+	});
+
+	it('rewrites MCP tool names containing characters Anthropic / OpenAI reject', () => {
+		const safeName = toProviderSafeToolName('my.server__list-dashboards');
+		expect(safeName).toMatch(SAFE_PATTERN);
+		expect(safeName.startsWith('my_server__list-dashboards_')).toBe(true);
+	});
+
+	it('caps overlong tool names to the provider limit', () => {
+		const long = 'a'.repeat(80) + '.suffix';
+		const safeName = toProviderSafeToolName(long);
+		expect(safeName.length).toBeLessThanOrEqual(64);
+		expect(safeName).toMatch(SAFE_PATTERN);
+	});
+
+	it('is deterministic so a tool-call and its tool-result map to the same name', () => {
+		const input = 'namespace.one.two.three__some.tool';
+		expect(toProviderSafeToolName(input)).toBe(toProviderSafeToolName(input));
+	});
+
+	it('keeps distinct original names distinct after sanitization', () => {
+		expect(toProviderSafeToolName('a.b')).not.toBe(toProviderSafeToolName('a.c'));
+	});
+});
+
+describe('sanitizeToolNames', () => {
+	it('rewrites the call and its result with the same name', () => {
+		const dirtyName = 'metabase.local__list-dashboards';
+		const messages: ModelMessage[] = [
+			{ role: 'user', content: 'hello' },
+			{
+				role: 'assistant',
+				content: [{ type: 'tool-call', toolCallId: 'id1', toolName: dirtyName, input: {} }],
+			},
+			{
+				role: 'tool',
+				content: [
+					{
+						type: 'tool-result',
+						toolCallId: 'id1',
+						toolName: dirtyName,
+						output: { type: 'json', value: { dashboards: [] } },
+					},
+				],
+			},
+		];
+
+		const [, assistant, tool] = sanitizeToolNames(messages);
+		const callName = (assistant.content[0] as { toolName: string }).toolName;
+		const resultName = (tool.content[0] as { toolName: string }).toolName;
+
+		expect(callName).toMatch(SAFE_PATTERN);
+		expect(callName.length).toBeLessThanOrEqual(64);
+		expect(resultName).toBe(callName);
 	});
 });
