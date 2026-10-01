@@ -61,6 +61,23 @@ export function sanitizeToolNames(messages: ModelMessage[]): ModelMessage[] {
 	});
 }
 
+/**
+ * Rewrites the KEYS of a tools map with `toProviderSafeToolName` so the names offered to the
+ * provider match the sanitized names in the replayed history. The values (tool definitions) are
+ * untouched, so a sanitized key still resolves to the right execute handler at tool-call time.
+ *
+ * Call this everywhere the tools map is handed to the provider or to code that compares against
+ * tool-call names (ToolLoopAgent, compactionService, telemetry), so replayed history and offered
+ * tools stay consistent.
+ */
+export function sanitizeToolDefinitionNames<T>(tools: Record<string, T>): Record<string, T> {
+	const safe: Record<string, T> = {};
+	for (const [name, definition] of Object.entries(tools)) {
+		safe[toProviderSafeToolName(name)] = definition;
+	}
+	return safe;
+}
+
 export function toProviderSafeToolName(toolName: string): string {
 	if (PROVIDER_SAFE_PATTERN.test(toolName) && toolName.length <= TOOL_NAME_MAX_LENGTH) {
 		return toolName;

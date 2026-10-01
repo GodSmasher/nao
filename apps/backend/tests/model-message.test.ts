@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	sanitizeToolCallIds,
+	sanitizeToolDefinitionNames,
 	sanitizeToolNames,
 	toProviderSafeToolCallId,
 	toProviderSafeToolName,
@@ -100,6 +101,18 @@ describe('toProviderSafeToolName', () => {
 
 	it('keeps distinct original names distinct after sanitization', () => {
 		expect(toProviderSafeToolName('a.b')).not.toBe(toProviderSafeToolName('a.c'));
+	});
+});
+
+describe('sanitizeToolDefinitionNames', () => {
+	it('rewrites keys so a tool offered to the provider matches the sanitized name in replayed history', () => {
+		const dirtyName = 'metabase.local__list-dashboards';
+		const tool = { execute: () => 'ok' };
+		const safeTools = sanitizeToolDefinitionNames({ [dirtyName]: tool, execute_sql: tool });
+
+		expect(safeTools.execute_sql).toBe(tool);
+		expect(safeTools[dirtyName]).toBeUndefined();
+		expect(safeTools[toProviderSafeToolName(dirtyName)]).toBe(tool);
 	});
 });
 
