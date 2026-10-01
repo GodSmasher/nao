@@ -49,6 +49,11 @@ export function buildStoryToolResult(
 		url: output.url,
 		chatUrl: output.chatUrl,
 	});
+	const structuredBase = {
+		...slimPayload,
+		code: output.code ?? null,
+		version: output.version ?? null,
+	};
 
 	return buildEmbedToolResult({
 		kind: 'story',
@@ -56,7 +61,7 @@ export function buildStoryToolResult(
 		embedUrl: output.embedUrl,
 		naoUrl,
 		jsonPayload: output,
-		structuredBase: slimPayload,
+		structuredBase,
 		sandboxHtml: options?.sandboxStoryHtml,
 	});
 }

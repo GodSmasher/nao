@@ -85,10 +85,10 @@ export async function getStoryOwnerId(storyId: string): Promise<string | undefin
 }
 
 /**
- * Fetch a story by UUID with its latest version and no owner filter. The caller is responsible
- * for its own access check (used after a share grants access to a story the user does not own).
+ * Shared projection+joins for fetching a single story by UUID with its latest version. The caller
+ * supplies the WHERE condition so the owner-scoped and no-owner-filter variants cannot drift.
  */
-export async function getStoryByIdWithLatestVersion(storyId: string): Promise<UserStoryRow | null> {
+async function queryOneStoryWithLatestVersion(whereCondition: SQL): Promise<UserStoryRow | null> {
 	const latestVersions = latestVersionsSubquery();
 
 	const [row] = await db
@@ -119,54 +119,28 @@ export async function getStoryByIdWithLatestVersion(storyId: string): Promise<Us
 			s.storyVersion,
 			and(eq(s.storyVersion.storyId, s.story.id), eq(s.storyVersion.version, latestVersions.maxVersion)),
 		)
-		.where(eq(s.story.id, storyId))
+		.where(whereCondition)
 		.limit(1)
 		.execute();
 
 	return row ?? null;
 }
 
-export async function getStoryByIdForUser(storyId: string, userId: string): Promise<UserStoryRow | null> {
-	const latestVersions = latestVersionsSubquery();
+/**
+ * Fetch a story by UUID with its latest version and no owner filter. The caller is responsible
+ * for its own access check (used after a share grants access to a story the user does not own).
+ */
+export function getStoryByIdWithLatestVersion(storyId: string): Promise<UserStoryRow | null> {
+	return queryOneStoryWithLatestVersion(eq(s.story.id, storyId));
+}
 
-	const [row] = await db
-		.select({
-			id: s.story.id,
-			chatId: s.story.chatId,
-			projectId: sql<string>`coalesce(${s.story.projectId}, ${s.chat.projectId})`,
-			userId: s.story.userId,
-			slug: s.story.slug,
-			title: s.story.title,
-			isLive: s.story.isLive,
-			isLiveTextDynamic: s.story.isLiveTextDynamic,
-			cacheSchedule: s.story.cacheSchedule,
-			cacheScheduleDescription: s.story.cacheScheduleDescription,
-			archivedAt: s.story.archivedAt,
-			certifiedAt: s.story.certifiedAt,
-			certifiedByName: storyCertifier.name,
-			createdAt: s.story.createdAt,
-			updatedAt: s.story.updatedAt,
-			code: s.storyVersion.code,
-			version: s.storyVersion.version,
-		})
-		.from(s.story)
-		.leftJoin(s.chat, eq(s.story.chatId, s.chat.id))
-		.leftJoin(storyCertifier, eq(s.story.certifiedBy, storyCertifier.id))
-		.innerJoin(latestVersions, eq(s.story.id, latestVersions.storyId))
-		.innerJoin(
-			s.storyVersion,
-			and(eq(s.storyVersion.storyId, s.story.id), eq(s.storyVersion.version, latestVersions.maxVersion)),
-		)
-		.where(
-			and(
-				eq(s.story.id, storyId),
-				or(eq(s.chat.userId, userId), and(isNull(s.story.chatId), eq(s.story.userId, userId))),
-			),
-		)
-		.limit(1)
-		.execute();
-
-	return row ?? null;
+export function getStoryByIdForUser(storyId: string, userId: string): Promise<UserStoryRow | null> {
+	return queryOneStoryWithLatestVersion(
+		and(
+			eq(s.story.id, storyId),
+			or(eq(s.chat.userId, userId), and(isNull(s.story.chatId), eq(s.story.userId, userId))),
+		)!,
+	);
 }
 
 export async function getStandaloneStoryByUserAndSlug(

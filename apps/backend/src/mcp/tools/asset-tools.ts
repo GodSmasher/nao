@@ -72,7 +72,10 @@ const DELETE_STORY_DESCRIPTION =
 
 const STORY_ID_INPUT = z
 	.string()
-	.describe('Story UUID (from `list_stories.id` or `ask_nao.stories[].id`). Not the slug.');
+	.describe(
+		'Story UUID (from `list_stories.id` or `ask_nao.stories[].id`) OR share UUID ' +
+			'(from `list_stories.shareId`, also the id in a `/stories/shared/<id>` URL). Not the slug.',
+	);
 
 type DisplayChartMcpInput = displayChart.ChartInput & { chat_id?: string };
 
@@ -302,9 +305,23 @@ function registerStoryManagementTools(server: McpServer, ctx: McpContext): void 
 				.describe('Stories visible to the current user in this project, newest first.'),
 		},
 		handler: async ({ limit, archived }) => {
+			// Pre-fetch at the own-query's maximum (100) rather than the user's `limit`, so the
+			// merged (own + shared) result can be ranked by updatedAt globally. The underlying
+			// own query is still ordered by createdAt desc, so this trades correctness for cost
+			// only when a user has more than 100 own stories in a project; past that point an
+			// own story edited recently but created outside the top 100 by createdAt could still
+			// be missed. Full correctness needs the own query itself to accept an updatedAt
+			// ordering, which is out of scope here.
+			const MAX_PREFETCH = 100;
 			const [ownStories, sharedStories] = await Promise.all([
-				storyQueries.listAllUserStoriesInProject(ctx.userId, ctx.projectId, { archived, limit }),
-				sharedStoryQueries.listUserSharedStories([ctx.projectId], ctx.userId, ctx.projectId),
+				storyQueries.listAllUserStoriesInProject(ctx.userId, ctx.projectId, {
+					archived,
+					limit: MAX_PREFETCH,
+				}),
+				sharedStoryQueries.listSharedStoryMetadataForUser(ctx.userId, ctx.projectId, {
+					archived,
+					limit: MAX_PREFETCH,
+				}),
 			]);
 
 			const ownIds = new Set(ownStories.map((story) => story.id));
@@ -313,35 +330,20 @@ function registerStoryManagementTools(server: McpServer, ctx: McpContext): void 
 			);
 			const sharedItems = sharedStories
 				.filter((share) => !ownIds.has(share.storyId))
-				.filter((share) => (archived ? true : share.archivedAt == null))
 				.map((share) => {
-					const storyLike: storyQueries.UserStoryRow = {
+					const storyRef = { id: share.storyId, slug: share.slug, chatId: share.chatId };
+					return {
 						id: share.storyId,
-						chatId: share.chatId,
-						projectId: share.projectId,
-						userId: share.userId,
-						slug: share.slug,
 						title: share.title,
-						isLive: share.isLive,
-						isLiveTextDynamic: false,
-						cacheSchedule: null,
-						cacheScheduleDescription: null,
-						archivedAt: share.archivedAt ?? null,
-						certifiedAt: share.certifiedAt,
-						certifiedByName: share.certifiedByName,
-						createdAt: share.createdAt,
-						updatedAt: share.updatedAt,
-						code: share.code,
-						version: share.version,
+						url: storyUrl(storyRef),
+						chatUrl: storyChatUrl(storyRef),
+						archived: share.archivedAt !== null,
+						kind:
+							share.visibility === 'project' ? ('shared-project' as const) : ('shared-with-me' as const),
+						shareId: share.shareId,
+						createdAt: share.createdAt.toISOString(),
+						updatedAt: share.updatedAt.toISOString(),
 					};
-					return toStoryListItem(
-						storyLike,
-						{ url: storyUrl(storyLike), chatUrl: storyChatUrl(storyLike) },
-						{
-							shareId: share.id,
-							kind: share.visibility === 'project' ? 'shared-project' : 'shared-with-me',
-						},
-					);
 				});
 
 			const merged = [...ownItems, ...sharedItems]

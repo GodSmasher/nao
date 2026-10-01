@@ -71,19 +71,82 @@ export async function createSharedStory(
 	return saved;
 }
 
+export type SharedStoryListItem = {
+	shareId: string;
+	storyId: string;
+	projectId: string;
+	chatId: string | null;
+	slug: string;
+	title: string;
+	visibility: string;
+	createdAt: Date;
+	updatedAt: Date;
+	archivedAt: Date | null;
+};
+
+/**
+ * Lightweight listing of shared stories visible to the caller: just the metadata needed to
+ * build a list_stories response. Does not join `story_version`, so a large share list does not
+ * pull every story body on each call.
+ */
+export async function listSharedStoryMetadataForUser(
+	userId: string,
+	projectId: string,
+	options?: { archived?: boolean; limit?: number },
+): Promise<SharedStoryListItem[]> {
+	const archivedPredicate =
+		options?.archived === true ? sql`${s.story.archivedAt} IS NOT NULL` : isNull(s.story.archivedAt);
+
+	let query = db
+		.select({
+			shareId: s.sharedStory.id,
+			storyId: s.sharedStory.storyId,
+			projectId: s.sharedStory.projectId,
+			chatId: s.story.chatId,
+			slug: s.story.slug,
+			title: s.story.title,
+			visibility: s.sharedStory.visibility,
+			createdAt: s.sharedStory.createdAt,
+			updatedAt: s.story.updatedAt,
+			archivedAt: s.story.archivedAt,
+		})
+		.from(s.sharedStory)
+		.innerJoin(s.story, eq(s.sharedStory.storyId, s.story.id))
+		.where(
+			and(
+				eq(s.sharedStory.projectId, projectId),
+				archivedPredicate,
+				or(
+					eq(s.sharedStory.visibility, 'project'),
+					eq(s.sharedStory.userId, userId),
+					sharedStoryGrantsUser(userId),
+				),
+			),
+		)
+		.orderBy(desc(s.story.updatedAt))
+		.$dynamic();
+
+	if (options?.limit !== undefined) {
+		query = query.limit(options.limit);
+	}
+	return query.execute();
+}
+
 export async function getSharedStory(id: string): Promise<SharedStoryWithLatest | null> {
 	const [row] = await querySharedStories(eq(s.sharedStory.id, id));
 	return row ?? null;
 }
 
 /**
- * Resolve a `shared_story.id` to its underlying `story_id` for a user who has access, scoped to a
- * project. Returns null when the share does not exist, lives in another project, or the caller
- * has no access path to it (not the sharer, no direct/group grant, and the share is not visible
- * to the whole project).
+ * Resolve an id to the underlying `story_id` of a share the user has access to, scoped to a
+ * project. Accepts either the `shared_story.id` (the UUID in a `/stories/shared/<id>` URL) or
+ * the underlying `story_id` (what `list_stories` returns), so non-owners can look a story up
+ * either way. Returns null when no matching share exists in the project or the caller has no
+ * access path to it (not the sharer, no direct/group grant, and the share is not visible to
+ * the whole project).
  */
 export async function resolveSharedStoryIdForUser(
-	shareId: string,
+	shareOrStoryId: string,
 	userId: string,
 	projectId: string,
 ): Promise<string | null> {
@@ -92,7 +155,7 @@ export async function resolveSharedStoryIdForUser(
 		.from(s.sharedStory)
 		.where(
 			and(
-				eq(s.sharedStory.id, shareId),
+				or(eq(s.sharedStory.id, shareOrStoryId), eq(s.sharedStory.storyId, shareOrStoryId)),
 				eq(s.sharedStory.projectId, projectId),
 				or(
 					eq(s.sharedStory.visibility, 'project'),
