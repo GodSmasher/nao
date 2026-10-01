@@ -150,6 +150,36 @@ def test_byte_cap_counts_nested_values_not_only_their_container_header():
     assert "bytes" in str(excinfo.value)
 
 
+def test_memoryview_cells_count_against_the_byte_cap():
+    """`sys.getsizeof` reports only the view object (~192 bytes) and excludes the backing buffer,
+    so a large BLOB wrapped in memoryview would otherwise bypass the cap. The sizer must count
+    `nbytes`."""
+    big = memoryview(b"x" * (256 * 1024))
+    cursor = _FetchallCursor(rows=[(1, big)], columns=["id", "blob"])
+    with patch.dict(os.environ, {"NAO_SQL_MAX_RESULT_BYTES": "100000"}):
+        with pytest.raises(ResultTooLargeError) as excinfo:
+            _run(cursor)
+    assert "bytes" in str(excinfo.value)
+
+
+def test_pathologically_nested_cell_is_rejected_as_too_large_not_as_recursion_error():
+    """A cell nested beyond CPython's recursion limit must raise ResultTooLargeError (the
+    intended user-facing error), never let RecursionError escape as a worker crash."""
+    deep: object = []
+    cursor_rows: list[tuple]
+    # Build a chain ~1500 levels deep — well past CPython's default limit of 1000.
+    current = deep
+    for _ in range(1500):
+        child: list = []
+        current.append(child)
+        current = child
+    cursor_rows = [(deep,)]
+    cursor = _FetchallCursor(rows=cursor_rows, columns=["payload"])
+    with pytest.raises(ResultTooLargeError) as excinfo:
+        _run(cursor)
+    assert "nested too deeply" in str(excinfo.value)
+
+
 def test_fetchmany_batch_shrinks_to_the_row_budget_so_a_tight_cap_cannot_overshoot():
     """fetchmany should request at most `max_rows + 1` rows per batch, so a cap of 5 does not
     cause the driver to materialize a full 10,000-row batch before the check runs."""

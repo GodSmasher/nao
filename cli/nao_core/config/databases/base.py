@@ -63,7 +63,10 @@ def _guard_dataframe(df: "pd.DataFrame", max_rows: int, max_bytes: int) -> "pd.D
     return df
 
 
-def _recursive_size(value: Any, _seen: set[int] | None = None) -> int:
+_RECURSIVE_SIZE_MAX_DEPTH = 128
+
+
+def _recursive_size(value: Any, _seen: set[int] | None = None, _depth: int = 0) -> int:
     """Approximate the in-memory size of a cell including nested containers.
 
     ``sys.getsizeof`` returns only the top-level container's own size (24-56
@@ -71,11 +74,21 @@ def _recursive_size(value: Any, _seen: set[int] | None = None) -> int:
     nested JSON blob of thousands of rows would otherwise register as a few
     dozen bytes and sail past the byte cap. This walks lists, tuples, sets,
     frozensets and dicts and sums the sizes of their elements once each.
-    Not exact for every Python object, but close enough to stop the
-    pathological "one huge nested SELECT" case before the worker is killed.
+
+    ``memoryview`` is special-cased: ``sys.getsizeof`` reports only the view
+    object (~192 bytes) and excludes the backing buffer, so a large binary
+    result (e.g. a BLOB column) would otherwise bypass the cap. ``.nbytes``
+    gives the real size of the viewed data.
+
+    Depth is capped at ``_RECURSIVE_SIZE_MAX_DEPTH`` and the caller catches
+    ``RecursionError`` and reports it as ``ResultTooLargeError`` so a
+    pathologically nested payload can never crash the worker instead of
+    being rejected.
     """
     import sys
 
+    if _depth >= _RECURSIVE_SIZE_MAX_DEPTH:
+        return sys.getsizeof(value)
     if _seen is None:
         _seen = set()
     value_id = id(value)
@@ -83,18 +96,31 @@ def _recursive_size(value: Any, _seen: set[int] | None = None) -> int:
         return 0
     _seen.add(value_id)
 
+    if isinstance(value, memoryview):
+        return sys.getsizeof(value) + value.nbytes
     size = sys.getsizeof(value)
-    if isinstance(value, (str, bytes, bytearray, memoryview)):
+    if isinstance(value, (str, bytes, bytearray)):
         return size
     if isinstance(value, dict):
         for key, item in value.items():
-            size += _recursive_size(key, _seen) + _recursive_size(item, _seen)
+            size += _recursive_size(key, _seen, _depth + 1) + _recursive_size(item, _seen, _depth + 1)
         return size
     if isinstance(value, (list, tuple, set, frozenset)):
         for item in value:
-            size += _recursive_size(item, _seen)
+            size += _recursive_size(item, _seen, _depth + 1)
         return size
     return size
+
+
+def _row_size(row_tuple: tuple) -> int:
+    """Approximate the in-memory size of a row, converting a pathologically nested payload into a
+    guard-friendly ``ResultTooLargeError`` instead of letting ``RecursionError`` escape."""
+    try:
+        return sum(_recursive_size(cell) for cell in row_tuple)
+    except RecursionError as exc:
+        raise ResultTooLargeError(
+            _too_large_message("a row contains a value nested too deeply to measure safely")
+        ) from exc
 
 
 def _fetch_bounded_rows(cursor: Any, max_rows: int, max_bytes: int) -> list[tuple]:
@@ -120,7 +146,7 @@ def _fetch_bounded_rows(cursor: Any, max_rows: int, max_bytes: int) -> list[tupl
         for row in batch:
             row_tuple = tuple(row)
             rows.append(row_tuple)
-            total_bytes += sum(_recursive_size(cell) for cell in row_tuple)
+            total_bytes += _row_size(row_tuple)
             if len(rows) > max_rows:
                 raise ResultTooLargeError(_too_large_message(f"more than {max_rows} rows"))
             if total_bytes > max_bytes:
