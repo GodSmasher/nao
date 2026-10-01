@@ -69,11 +69,25 @@ export function sanitizeToolNames(messages: ModelMessage[]): ModelMessage[] {
  * Call this everywhere the tools map is handed to the provider or to code that compares against
  * tool-call names (ToolLoopAgent, compactionService, telemetry), so replayed history and offered
  * tools stay consistent.
+ *
+ * Uses a null-prototype map so a tool literally named ``__proto__`` becomes an own property
+ * instead of silently mutating the object prototype. Throws when two originals sanitize to the
+ * same key: both would otherwise overwrite each other, and a replayed call for one could then
+ * silently execute the other's handler.
  */
 export function sanitizeToolDefinitionNames<T>(tools: Record<string, T>): Record<string, T> {
-	const safe: Record<string, T> = {};
+	const safe: Record<string, T> = Object.create(null);
+	const originalByKey = new Map<string, string>();
 	for (const [name, definition] of Object.entries(tools)) {
-		safe[toProviderSafeToolName(name)] = definition;
+		const safeName = toProviderSafeToolName(name);
+		const existingOriginal = originalByKey.get(safeName);
+		if (existingOriginal !== undefined && existingOriginal !== name) {
+			throw new Error(
+				`Tool name collision after sanitization: "${existingOriginal}" and "${name}" both resolve to "${safeName}". Rename one of them.`,
+			);
+		}
+		originalByKey.set(safeName, name);
+		safe[safeName] = definition;
 	}
 	return safe;
 }

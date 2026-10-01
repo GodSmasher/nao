@@ -114,6 +114,24 @@ describe('sanitizeToolDefinitionNames', () => {
 		expect(safeTools[dirtyName]).toBeUndefined();
 		expect(safeTools[toProviderSafeToolName(dirtyName)]).toBe(tool);
 	});
+
+	it('stores a tool literally named __proto__ as an own property, not on the prototype', () => {
+		const tool = { execute: () => 'proto' };
+		// Object literal syntax `{ __proto__: X }` sets the prototype, not a property named
+		// __proto__, so use fromEntries to actually create a property called "__proto__".
+		const input = Object.fromEntries([['__proto__', tool]]);
+		const safeTools = sanitizeToolDefinitionNames(input);
+
+		expect(Object.prototype.hasOwnProperty.call(safeTools, '__proto__')).toBe(true);
+		expect(safeTools['__proto__']).toBe(tool);
+	});
+
+	it('throws when two originals sanitize to the same key so one cannot silently shadow the other', () => {
+		const dirty = 'a.';
+		const colliding = toProviderSafeToolName(dirty);
+		const tool = { execute: () => 'ok' };
+		expect(() => sanitizeToolDefinitionNames({ [dirty]: tool, [colliding]: tool })).toThrow(/Tool name collision/);
+	});
 });
 
 describe('sanitizeToolNames', () => {
