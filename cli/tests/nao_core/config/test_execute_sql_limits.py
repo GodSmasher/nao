@@ -139,10 +139,15 @@ def test_fetchall_only_cursor_is_rejected_by_the_post_fetch_cap():
 
 
 def test_byte_cap_counts_nested_values_not_only_their_container_header():
-    """A row containing a large nested list must count against the byte cap. sys.getsizeof alone
-    would see the top-level list as ~56 bytes; the recursive accounting walks its elements so a
-    pathological nested payload is caught before it can OOM the worker."""
-    big_payload = ["x" * 1024] * 200  # ~200 KiB when the elements are counted
+    """A row containing a nested list of distinct values must count every element against the
+    byte cap. `sys.getsizeof` alone would see the top-level list as ~1,800 bytes; the deep sizer
+    walks its elements so a pathological nested payload is caught before it can OOM the worker.
+
+    Each payload entry is a distinct string so the sizer's object-identity dedup — correct for
+    real memory accounting — does not fold them into one count. Real SQL rows return distinct
+    objects for distinct values anyway.
+    """
+    big_payload = [f"row-{i}:" + "x" * 1024 for i in range(200)]  # ~200 KiB of distinct strings
     cursor = _FetchallCursor(rows=[(1, big_payload)], columns=["id", "payload"])
     with patch.dict(os.environ, {"NAO_SQL_MAX_RESULT_BYTES": "10000"}):
         with pytest.raises(ResultTooLargeError) as excinfo:

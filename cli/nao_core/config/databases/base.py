@@ -115,10 +115,10 @@ def _fetch_bounded_rows(cursor: Any, max_rows: int, max_bytes: int) -> list[tupl
     materializing it all at once (the original cause of the OOM). The batch
     size shrinks as the row budget runs out so a cap of (say) 10 rows cannot
     cause the driver to materialize a full 10,000-row batch before the check
-    runs. Row size is approximated with ``_recursive_size`` which walks
-    nested containers; it undercounts opaque driver-specific objects but is
-    cheap and catches the pathological large-payload case before the
-    process is killed.
+    runs. Row size is approximated with ``_deep_size`` which walks nested
+    containers iteratively; it undercounts opaque driver-specific objects
+    but is cheap and catches the pathological large-payload case before
+    the process is killed.
     """
     rows: list[tuple] = []
     total_bytes = 0
