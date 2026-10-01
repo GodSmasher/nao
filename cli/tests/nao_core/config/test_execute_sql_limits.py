@@ -162,22 +162,23 @@ def test_memoryview_cells_count_against_the_byte_cap():
     assert "bytes" in str(excinfo.value)
 
 
-def test_pathologically_nested_cell_is_rejected_as_too_large_not_as_recursion_error():
-    """A cell nested beyond CPython's recursion limit must raise ResultTooLargeError (the
-    intended user-facing error), never let RecursionError escape as a worker crash."""
-    deep: object = []
-    cursor_rows: list[tuple]
-    # Build a chain ~1500 levels deep — well past CPython's default limit of 1000.
+def test_pathologically_nested_cell_still_counts_every_descendant_against_the_byte_cap():
+    """A payload nested far beyond CPython's recursion limit (~1000) must still have every
+    descendant counted, so it trips the byte cap instead of silently slipping through. The sizer
+    uses an iterative traversal — no RecursionError and no silent depth cutoff."""
+    deep: list = []
     current = deep
+    # ~1500 levels of nested empty lists — well past CPython's default recursion limit.
     for _ in range(1500):
         child: list = []
         current.append(child)
         current = child
-    cursor_rows = [(deep,)]
-    cursor = _FetchallCursor(rows=cursor_rows, columns=["payload"])
-    with pytest.raises(ResultTooLargeError) as excinfo:
-        _run(cursor)
-    assert "nested too deeply" in str(excinfo.value)
+    cursor = _FetchallCursor(rows=[(deep,)], columns=["payload"])
+    # 1500 list objects × ~56 bytes/each ≈ 84 KB, so a 20 KB cap must trip.
+    with patch.dict(os.environ, {"NAO_SQL_MAX_RESULT_BYTES": "20000"}):
+        with pytest.raises(ResultTooLargeError) as excinfo:
+            _run(cursor)
+    assert "bytes" in str(excinfo.value)
 
 
 def test_fetchmany_batch_shrinks_to_the_row_budget_so_a_tight_cap_cannot_overshoot():
