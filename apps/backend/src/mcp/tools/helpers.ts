@@ -48,8 +48,7 @@ export async function resolveChartChatId(chatId: string | undefined, ctx: McpCon
 export async function resolveStoryForRead(storyIdOrShareId: string, ctx: McpContext): Promise<UserStoryRow> {
 	const ownStory = await storyQueries.getStoryByIdForUser(storyIdOrShareId, ctx.userId);
 	if (ownStory) {
-		const storyProjectId = await storyQueries.getStoryProjectId(storyIdOrShareId);
-		if (storyProjectId !== ctx.projectId) {
+		if (ownStory.projectId !== ctx.projectId) {
 			throw new Error(`Story not found: ${storyIdOrShareId}`);
 		}
 		return ownStory;
@@ -80,8 +79,7 @@ export async function resolveStoryForOwner(storyId: string, ctx: McpContext): Pr
 	if (!story) {
 		throw new Error(`Story not found: ${storyId}`);
 	}
-	const storyProjectId = await storyQueries.getStoryProjectId(storyId);
-	if (storyProjectId !== ctx.projectId) {
+	if (story.projectId !== ctx.projectId) {
 		throw new Error(`Story not found: ${storyId}`);
 	}
 	return story;
