@@ -1,18 +1,96 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import warnings
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import questionary
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from nao_core.config.exceptions import ResultTooLargeError
+
 if TYPE_CHECKING:
     import pandas as pd
     from ibis import BaseBackend
+
+
+DEFAULT_SQL_MAX_RESULT_ROWS = 100_000
+DEFAULT_SQL_MAX_RESULT_BYTES = 100 * 1024 * 1024  # 100 MiB
+SQL_FETCH_BATCH_SIZE = 10_000
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive integer from env; fall back to default for missing or invalid values."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _sql_result_limits() -> tuple[int, int]:
+    """Return the configured (max_rows, max_bytes) for a SQL result."""
+    return (
+        _positive_int_env("NAO_SQL_MAX_RESULT_ROWS", DEFAULT_SQL_MAX_RESULT_ROWS),
+        _positive_int_env("NAO_SQL_MAX_RESULT_BYTES", DEFAULT_SQL_MAX_RESULT_BYTES),
+    )
+
+
+def _too_large_message(reason: str) -> str:
+    return (
+        f"Result too large: {reason}. Narrow the query (add a WHERE filter, aggregate, or LIMIT), "
+        "or raise NAO_SQL_MAX_RESULT_ROWS / NAO_SQL_MAX_RESULT_BYTES if this is expected."
+    )
+
+
+def _guard_dataframe(df: "pd.DataFrame", max_rows: int, max_bytes: int) -> "pd.DataFrame":
+    """Reject a materialized DataFrame that exceeds the configured caps."""
+    row_count = len(df)
+    if row_count > max_rows:
+        raise ResultTooLargeError(_too_large_message(f"{row_count} rows exceed the cap of {max_rows}"))
+    byte_size = int(df.memory_usage(deep=True).sum())
+    if byte_size > max_bytes:
+        raise ResultTooLargeError(
+            _too_large_message(f"{byte_size} bytes exceed the cap of {max_bytes} ({max_bytes // (1024 * 1024)} MiB)")
+        )
+    return df
+
+
+def _fetch_bounded_rows(cursor: Any, max_rows: int, max_bytes: int) -> list[tuple]:
+    """Fetch cursor rows in batches, stopping before either cap is exceeded.
+
+    Uses ``fetchmany`` so the driver streams the result instead of
+    materializing it all at once (the original cause of the OOM).
+    Approximates row size with ``sys.getsizeof`` on each cell; it undercounts
+    nested containers but is cheap and good enough to catch the pathological
+    "one huge SELECT" case before the process is killed.
+    """
+    import sys
+
+    rows: list[tuple] = []
+    total_bytes = 0
+    while True:
+        batch = cursor.fetchmany(SQL_FETCH_BATCH_SIZE)
+        if not batch:
+            break
+        for row in batch:
+            row_tuple = tuple(row)
+            rows.append(row_tuple)
+            total_bytes += sum(sys.getsizeof(cell) for cell in row_tuple)
+            if len(rows) > max_rows:
+                raise ResultTooLargeError(_too_large_message(f"more than {max_rows} rows"))
+            if total_bytes > max_bytes:
+                raise ResultTooLargeError(
+                    _too_large_message(f"more than {max_bytes} bytes ({max_bytes // (1024 * 1024)} MiB) streamed")
+                )
+    return rows
 
 
 class DatabaseType(str, Enum):
@@ -214,8 +292,16 @@ class DatabaseConfig(BaseModel, ABC):
         ...
 
     def execute_sql(self, sql: str, conn: BaseBackend | None = None) -> pd.DataFrame:
-        """Execute arbitrary SQL and return results as a DataFrame."""
+        """Execute arbitrary SQL and return results as a DataFrame.
+
+        Enforces NAO_SQL_MAX_RESULT_ROWS and NAO_SQL_MAX_RESULT_BYTES: when the
+        driver supports ``fetchmany``, rows are streamed and the cap aborts
+        before the full result is in memory; otherwise the materialized
+        DataFrame is rejected after the fetch with ResultTooLargeError.
+        """
         import pandas as pd  # noqa: F811
+
+        max_rows, max_bytes = _sql_result_limits()
 
         owns_connection = conn is None
         if conn is None:
@@ -224,20 +310,28 @@ class DatabaseConfig(BaseModel, ABC):
             cursor = conn.raw_sql(sql)  # type: ignore[union-attr]
 
             if hasattr(cursor, "fetchdf"):
-                return cursor.fetchdf()
+                return _guard_dataframe(cursor.fetchdf(), max_rows, max_bytes)
             if hasattr(cursor, "to_dataframe"):
-                return cursor.to_dataframe()
+                return _guard_dataframe(cursor.to_dataframe(), max_rows, max_bytes)
             if hasattr(cursor, "to_pandas"):
-                return cursor.to_pandas()
+                return _guard_dataframe(cursor.to_pandas(), max_rows, max_bytes)
 
             # ClickHouse (clickhouse_connect) returns QueryResult with result_rows + column_names
             if hasattr(cursor, "result_rows") and hasattr(cursor, "column_names"):
                 columns = list(cursor.column_names)
-                return pd.DataFrame(cursor.result_rows, columns=columns)  # type: ignore[arg-type]
+                return _guard_dataframe(
+                    pd.DataFrame(cursor.result_rows, columns=columns),  # type: ignore[arg-type]
+                    max_rows,
+                    max_bytes,
+                )
 
             if hasattr(cursor, "description") and cursor.description is not None and hasattr(cursor, "fetchall"):
                 columns = [desc[0] for desc in cursor.description]
-                return pd.DataFrame([tuple(row) for row in cursor.fetchall()], columns=columns)  # type: ignore[arg-type]
+                if callable(getattr(cursor, "fetchmany", None)):
+                    rows = _fetch_bounded_rows(cursor, max_rows, max_bytes)
+                else:
+                    rows = [tuple(row) for row in cursor.fetchall()]
+                return _guard_dataframe(pd.DataFrame(rows, columns=columns), max_rows, max_bytes)  # type: ignore[arg-type]
 
             raise TypeError(
                 f"Unsupported raw_sql result type: {type(cursor).__name__}. "
