@@ -27,7 +27,8 @@ import {
 	buildStoryMcpResultWithSandbox,
 	fetchLatestStoryVersion,
 	resolveChartChatId,
-	resolveStory,
+	resolveStoryForOwner,
+	resolveStoryForRead,
 } from './helpers';
 import { registerAgentToolAsMcp, registerMcpTool } from './register-mcp-tool';
 import { STORY_LIST_ITEM_SCHEMA, toStoryListItem } from './story-list-item';
@@ -62,19 +63,24 @@ const ARCHIVE_STORY_DESCRIPTION =
 	'the data and version history are preserved and the user can restore it from the nao UI.\n\n' +
 	'USE WHEN: the user wants to remove a story but keep recovery possible.\n' +
 	'SKIP WHEN: you need a permanent, irreversible delete → use `delete_story`.\n\n' +
-	'`story_id` must be the UUID (from `list_stories` or `ask_nao.stories[].id`), not the slug.';
+	'`story_id` must be the story UUID of a story the caller owns. Share UUIDs are rejected: a ' +
+	'share grants read access only.';
 
 const DELETE_STORY_DESCRIPTION =
 	'Permanently delete a story and all its versions. Cannot be undone.\n\n' +
 	'CONFIRM FIRST: ask the user to confirm the permanent deletion and suggest `archive_story` first. ' +
 	'Do not call this tool on ambiguous intent.\n' +
-	'USE WHEN: the user explicitly asks for a hard delete (compliance, mistaken story, sensitive data).\n';
+	'USE WHEN: the user explicitly asks for a hard delete (compliance, mistaken story, sensitive data).\n' +
+	'`story_id` must be the story UUID of a story the caller owns. Share UUIDs are rejected: a ' +
+	'share grants read access only.';
 
 const STORY_ID_INPUT = z
 	.string()
 	.describe(
-		'Story UUID (from `list_stories.id` or `ask_nao.stories[].id`) OR share UUID ' +
-			'(from `list_stories.shareId`, also the id in a `/stories/shared/<id>` URL). Not the slug.',
+		'Story UUID (from `list_stories.id` or `ask_nao.stories[].id`) OR, for `get_story` only, ' +
+			'a share UUID (`list_stories.shareId`; also the id in a `/stories/shared/<id>` URL). ' +
+			'The write tools (`archive_story`, `delete_story`, `update_story`) require the story ' +
+			'UUID and the caller must own the story. Not the slug.',
 	);
 
 type DisplayChartMcpInput = displayChart.ChartInput & { chat_id?: string };
@@ -366,7 +372,7 @@ function registerStoryManagementTools(server: McpServer, ctx: McpContext): void 
 		_meta: uiToolMeta(STORY_APP_URI),
 		errorMessage: (error) => (error instanceof Error ? error.message : 'get_story failed. Please try again.'),
 		handler: async ({ story_id }) => {
-			const story = await resolveStory(story_id, ctx);
+			const story = await resolveStoryForRead(story_id, ctx);
 			const version = await fetchLatestStoryVersion(story);
 
 			const embedUrl = storyEmbedUrl(story.id, ctx.projectId);
@@ -400,7 +406,7 @@ function registerStoryManagementTools(server: McpServer, ctx: McpContext): void 
 			archived: z.literal(true).describe('Always `true` on success — the story is now archived.'),
 		},
 		handler: async ({ story_id }) => {
-			const story = await resolveStory(story_id, ctx);
+			const story = await resolveStoryForOwner(story_id, ctx);
 			await storyQueries.archiveByStoryId(story.id);
 			const output = { id: story.id, archived: true as const };
 			return {
@@ -420,7 +426,7 @@ function registerStoryManagementTools(server: McpServer, ctx: McpContext): void 
 			deleted: z.literal(true).describe('Always `true` on success — the story and all versions are gone.'),
 		},
 		handler: async ({ story_id }) => {
-			const story = await resolveStory(story_id, ctx);
+			const story = await resolveStoryForOwner(story_id, ctx);
 			await storyQueries.deleteStory(story.id);
 			const output = { id: story.id, deleted: true as const };
 			return {

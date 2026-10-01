@@ -106,7 +106,9 @@ export async function listSharedStoryMetadataForUser(
 			slug: s.story.slug,
 			title: s.story.title,
 			visibility: s.sharedStory.visibility,
-			createdAt: s.sharedStory.createdAt,
+			// Use the story's own timestamps so a shared old story is not reported as newly
+			// created just because the share row is recent.
+			createdAt: s.story.createdAt,
 			updatedAt: s.story.updatedAt,
 			archivedAt: s.story.archivedAt,
 		})
