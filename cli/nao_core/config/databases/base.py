@@ -63,27 +63,64 @@ def _guard_dataframe(df: "pd.DataFrame", max_rows: int, max_bytes: int) -> "pd.D
     return df
 
 
+def _recursive_size(value: Any, _seen: set[int] | None = None) -> int:
+    """Approximate the in-memory size of a cell including nested containers.
+
+    ``sys.getsizeof`` returns only the top-level container's own size (24-56
+    bytes for a dict or list) and does not account for its elements, so a
+    nested JSON blob of thousands of rows would otherwise register as a few
+    dozen bytes and sail past the byte cap. This walks lists, tuples, sets,
+    frozensets and dicts and sums the sizes of their elements once each.
+    Not exact for every Python object, but close enough to stop the
+    pathological "one huge nested SELECT" case before the worker is killed.
+    """
+    import sys
+
+    if _seen is None:
+        _seen = set()
+    value_id = id(value)
+    if value_id in _seen:
+        return 0
+    _seen.add(value_id)
+
+    size = sys.getsizeof(value)
+    if isinstance(value, (str, bytes, bytearray, memoryview)):
+        return size
+    if isinstance(value, dict):
+        for key, item in value.items():
+            size += _recursive_size(key, _seen) + _recursive_size(item, _seen)
+        return size
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            size += _recursive_size(item, _seen)
+        return size
+    return size
+
+
 def _fetch_bounded_rows(cursor: Any, max_rows: int, max_bytes: int) -> list[tuple]:
     """Fetch cursor rows in batches, stopping before either cap is exceeded.
 
     Uses ``fetchmany`` so the driver streams the result instead of
-    materializing it all at once (the original cause of the OOM).
-    Approximates row size with ``sys.getsizeof`` on each cell; it undercounts
-    nested containers but is cheap and good enough to catch the pathological
-    "one huge SELECT" case before the process is killed.
+    materializing it all at once (the original cause of the OOM). The batch
+    size shrinks as the row budget runs out so a cap of (say) 10 rows cannot
+    cause the driver to materialize a full 10,000-row batch before the check
+    runs. Row size is approximated with ``_recursive_size`` which walks
+    nested containers; it undercounts opaque driver-specific objects but is
+    cheap and catches the pathological large-payload case before the
+    process is killed.
     """
-    import sys
-
     rows: list[tuple] = []
     total_bytes = 0
     while True:
-        batch = cursor.fetchmany(SQL_FETCH_BATCH_SIZE)
+        remaining_rows = max_rows - len(rows) + 1  # +1 so the > max_rows guard still trips
+        batch_size = max(1, min(SQL_FETCH_BATCH_SIZE, remaining_rows))
+        batch = cursor.fetchmany(batch_size)
         if not batch:
             break
         for row in batch:
             row_tuple = tuple(row)
             rows.append(row_tuple)
-            total_bytes += sum(sys.getsizeof(cell) for cell in row_tuple)
+            total_bytes += sum(_recursive_size(cell) for cell in row_tuple)
             if len(rows) > max_rows:
                 raise ResultTooLargeError(_too_large_message(f"more than {max_rows} rows"))
             if total_bytes > max_bytes:

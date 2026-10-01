@@ -13,15 +13,12 @@ from nao_core.config.exceptions import ResultTooLargeError
 
 
 class _FetchallCursor:
-    """Cursor shape nao's execute_sql takes the fetchall branch for."""
+    """Cursor shape nao's execute_sql takes the fetchall streaming branch for."""
 
-    def __init__(self, rows: list[tuple], columns: list[str], *, support_fetchmany: bool = True) -> None:
+    def __init__(self, rows: list[tuple], columns: list[str]) -> None:
         self.description = [(name,) for name in columns]
         self._rows = rows
         self._offset = 0
-        if not support_fetchmany:
-            # Simulate a driver that only exposes fetchall (no streaming).
-            self.fetchmany = None  # type: ignore[assignment]
 
     def fetchmany(self, size: int) -> list[tuple]:  # noqa: D401
         chunk = self._rows[self._offset : self._offset + size]
@@ -32,6 +29,22 @@ class _FetchallCursor:
         chunk = self._rows[self._offset :]
         self._offset = len(self._rows)
         return chunk
+
+
+class _FetchallOnlyCursor:
+    """Cursor shape for drivers that expose only fetchall (no fetchmany streaming).
+
+    nao falls back to a single ``fetchall`` and the oversized result is caught by the post-fetch
+    DataFrame cap. This cursor exercises that path.
+    """
+
+    def __init__(self, rows: list[tuple], columns: list[str]) -> None:
+        self.description = [(name,) for name in columns]
+        self._rows = rows
+        self.fetchmany_called = False
+
+    def fetchall(self) -> list[tuple]:  # noqa: D401
+        return list(self._rows)
 
 
 class _DataFrameCursor:
@@ -57,9 +70,13 @@ class _StubBackend:
 
 
 def _run(cursor: object) -> pd.DataFrame:
-    """Call execute_sql with a stub backend, bypassing config construction."""
+    """Call execute_sql with a stub backend, bypassing config construction.
+
+    ``execute_sql`` never dereferences ``self`` because ``conn`` is passed explicitly, so a plain
+    class-attribute call is enough to exercise the function.
+    """
     backend = _StubBackend(cursor)
-    return DatabaseConfig.execute_sql.__func__(DatabaseConfig, "SELECT 1", backend)  # type: ignore[arg-type]
+    return DatabaseConfig.execute_sql(DatabaseConfig, "SELECT 1", backend)  # type: ignore[arg-type]
 
 
 def test_fetchall_path_returns_rows_under_the_cap():
@@ -109,3 +126,56 @@ def test_invalid_env_values_fall_back_to_defaults_rather_than_disabling_the_cap(
     with patch.dict(os.environ, {"NAO_SQL_MAX_RESULT_ROWS": "not-a-number"}):
         df = _run(cursor)
     assert len(df) == 3
+
+
+def test_fetchall_only_cursor_is_rejected_by_the_post_fetch_cap():
+    """Drivers without `fetchmany` fall back to a single `fetchall`; the materialized DataFrame
+    still trips the cap, even though it is caught after the fact rather than during streaming."""
+    cursor = _FetchallOnlyCursor(rows=[(i,) for i in range(100)], columns=["id"])
+    with patch.dict(os.environ, {"NAO_SQL_MAX_RESULT_ROWS": "10"}):
+        with pytest.raises(ResultTooLargeError) as excinfo:
+            _run(cursor)
+    assert "100 rows exceed the cap of 10" in str(excinfo.value)
+
+
+def test_byte_cap_counts_nested_values_not_only_their_container_header():
+    """A row containing a large nested list must count against the byte cap. sys.getsizeof alone
+    would see the top-level list as ~56 bytes; the recursive accounting walks its elements so a
+    pathological nested payload is caught before it can OOM the worker."""
+    big_payload = ["x" * 1024] * 200  # ~200 KiB when the elements are counted
+    cursor = _FetchallCursor(rows=[(1, big_payload)], columns=["id", "payload"])
+    with patch.dict(os.environ, {"NAO_SQL_MAX_RESULT_BYTES": "10000"}):
+        with pytest.raises(ResultTooLargeError) as excinfo:
+            _run(cursor)
+    assert "bytes" in str(excinfo.value)
+
+
+def test_fetchmany_batch_shrinks_to_the_row_budget_so_a_tight_cap_cannot_overshoot():
+    """fetchmany should request at most `max_rows + 1` rows per batch, so a cap of 5 does not
+    cause the driver to materialize a full 10,000-row batch before the check runs."""
+    requested_sizes: list[int] = []
+
+    class _RecordingCursor:
+        description = [("id",)]
+
+        def __init__(self) -> None:
+            self._offset = 0
+            self._rows = [(i,) for i in range(100)]
+
+        def fetchmany(self, size: int) -> list[tuple]:
+            requested_sizes.append(size)
+            chunk = self._rows[self._offset : self._offset + size]
+            self._offset += size
+            return chunk
+
+        def fetchall(self) -> list[tuple]:  # pragma: no cover
+            return self._rows[self._offset :]
+
+    with patch.dict(os.environ, {"NAO_SQL_MAX_RESULT_ROWS": "5"}):
+        with pytest.raises(ResultTooLargeError):
+            _run(_RecordingCursor())
+
+    assert requested_sizes, "fetchmany was never called"
+    assert all(size <= 6 for size in requested_sizes), (
+        f"fetchmany asked for more than max_rows+1 rows per batch: {requested_sizes}"
+    )
