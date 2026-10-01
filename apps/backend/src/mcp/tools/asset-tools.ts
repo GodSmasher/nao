@@ -5,6 +5,7 @@ import { z } from 'zod';
 import zodV3 from 'zod/v3';
 
 import displayChartTool from '../../agents/tools/display-chart';
+import * as sharedStoryQueries from '../../queries/shared-story.queries';
 import * as storyQueries from '../../queries/story.queries';
 import {
 	buildAgentRenderedChartText,
@@ -43,13 +44,18 @@ const DISPLAY_CHART_DESCRIPTION =
 
 const DISPLAY_CHART_DATA_MODE_DESCRIPTION = DISPLAY_CHART_DESCRIPTION + CHART_DATA_MODE_DISPLAY_CHART_ADDENDUM;
 
-const LIST_STORIES_DESCRIPTION = 'List nao stories.';
+const LIST_STORIES_DESCRIPTION =
+	'List nao stories visible to the caller: their own stories, stories shared directly with them, ' +
+	'and stories shared with the whole project. Each item carries a `kind` and (for shared) `shareId` ' +
+	'so clients can distinguish origin and build share URLs.';
 
 const GET_STORY_DESCRIPTION =
-	'Fetch a single story with its latest content (`code`), version metadata, `url`, `chatUrl`, ' +
+	'Fetch a single story with its latest markdown (`code`), version metadata, `url`, `chatUrl`, ' +
 	'and a rendered HTML embed.\n\n' +
-	"Useful when you need the actual markdown of a story to get it's latest content and metadata.\n\n" +
-	'`story_id` must be the UUID (returned by `list_stories.id` or `ask_nao.stories[].id`), not the kebab-case slug.';
+	'`story_id` is the UUID of either a story (`list_stories.id` / `ask_nao.stories[].id`) OR a share ' +
+	'(`list_stories.shareId`; also the UUID in a `/stories/shared/<id>` URL). The caller must own the ' +
+	'story or have access to the share. `code` is the authoritative content; `sandboxStoryHtml` is ' +
+	'optional and omitted for large stories.';
 
 const ARCHIVE_STORY_DESCRIPTION =
 	'Archive (soft-delete) a story: it stops appearing in `list_stories` and `ask_nao` results, but ' +
@@ -296,14 +302,52 @@ function registerStoryManagementTools(server: McpServer, ctx: McpContext): void 
 				.describe('Stories visible to the current user in this project, newest first.'),
 		},
 		handler: async ({ limit, archived }) => {
-			const stories = await storyQueries.listAllUserStoriesInProject(ctx.userId, ctx.projectId, {
-				archived,
-				limit,
-			});
-			const result = stories.map((story) =>
+			const [ownStories, sharedStories] = await Promise.all([
+				storyQueries.listAllUserStoriesInProject(ctx.userId, ctx.projectId, { archived, limit }),
+				sharedStoryQueries.listUserSharedStories([ctx.projectId], ctx.userId, ctx.projectId),
+			]);
+
+			const ownIds = new Set(ownStories.map((story) => story.id));
+			const ownItems = ownStories.map((story) =>
 				toStoryListItem(story, { url: storyUrl(story), chatUrl: storyChatUrl(story) }),
 			);
-			const output = { stories: result };
+			const sharedItems = sharedStories
+				.filter((share) => !ownIds.has(share.storyId))
+				.filter((share) => (archived ? true : share.archivedAt == null))
+				.map((share) => {
+					const storyLike: storyQueries.UserStoryRow = {
+						id: share.storyId,
+						chatId: share.chatId,
+						projectId: share.projectId,
+						userId: share.userId,
+						slug: share.slug,
+						title: share.title,
+						isLive: share.isLive,
+						isLiveTextDynamic: false,
+						cacheSchedule: null,
+						cacheScheduleDescription: null,
+						archivedAt: share.archivedAt ?? null,
+						certifiedAt: share.certifiedAt,
+						certifiedByName: share.certifiedByName,
+						createdAt: share.createdAt,
+						updatedAt: share.updatedAt,
+						code: share.code,
+						version: share.version,
+					};
+					return toStoryListItem(
+						storyLike,
+						{ url: storyUrl(storyLike), chatUrl: storyChatUrl(storyLike) },
+						{
+							shareId: share.id,
+							kind: share.visibility === 'project' ? 'shared-project' : 'shared-with-me',
+						},
+					);
+				});
+
+			const merged = [...ownItems, ...sharedItems]
+				.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0))
+				.slice(0, limit);
+			const output = { stories: merged };
 			return {
 				content: [{ type: 'text' as const, text: JSON.stringify(output) }],
 				structuredContent: output,

@@ -16,6 +16,7 @@ export type SharedStoryWithLatest = DBSharedStory & {
 	code: string;
 	version: number;
 	isLive: boolean;
+	archivedAt: Date | null;
 	certifiedAt: Date | null;
 	certifiedByName: string | null;
 	sharedWithCount: number;
@@ -73,6 +74,36 @@ export async function createSharedStory(
 export async function getSharedStory(id: string): Promise<SharedStoryWithLatest | null> {
 	const [row] = await querySharedStories(eq(s.sharedStory.id, id));
 	return row ?? null;
+}
+
+/**
+ * Resolve a `shared_story.id` to its underlying `story_id` for a user who has access, scoped to a
+ * project. Returns null when the share does not exist, lives in another project, or the caller
+ * has no access path to it (not the sharer, no direct/group grant, and the share is not visible
+ * to the whole project).
+ */
+export async function resolveSharedStoryIdForUser(
+	shareId: string,
+	userId: string,
+	projectId: string,
+): Promise<string | null> {
+	const [row] = await db
+		.select({ storyId: s.sharedStory.storyId })
+		.from(s.sharedStory)
+		.where(
+			and(
+				eq(s.sharedStory.id, shareId),
+				eq(s.sharedStory.projectId, projectId),
+				or(
+					eq(s.sharedStory.visibility, 'project'),
+					eq(s.sharedStory.userId, userId),
+					sharedStoryGrantsUser(userId),
+				),
+			),
+		)
+		.limit(1)
+		.execute();
+	return row?.storyId ?? null;
 }
 
 export async function canUserAccessSharedStory(sharedStoryId: string, userId: string): Promise<boolean> {
@@ -321,6 +352,7 @@ function querySharedStories(whereCondition: SQL): Promise<SharedStoryWithLatest[
 			code: s.storyVersion.code,
 			version: s.storyVersion.version,
 			isLive: s.story.isLive,
+			archivedAt: s.story.archivedAt,
 			certifiedAt: s.story.certifiedAt,
 			certifiedByName: storyCertifier.name,
 			sharedWithCount: sql<number>`coalesce(${accessCounts.cnt}, 0)`,

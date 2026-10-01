@@ -6,6 +6,7 @@ import type { displayChart, displayMap } from '@nao/shared/tools';
 import * as chatQueries from '../../queries/chat.queries';
 import { insertMcpChartEmbed, insertMcpMapEmbed } from '../../queries/mcp-embed.queries';
 import { getMcpQueryData, upsertMcpQueryData } from '../../queries/mcp-query-data.queries';
+import * as sharedStoryQueries from '../../queries/shared-story.queries';
 import type { UserStoryRow } from '../../queries/story.queries';
 import * as storyQueries from '../../queries/story.queries';
 import { validateMapConfig } from '../../utils/display-map-validate';
@@ -37,16 +38,29 @@ export async function resolveChartChatId(chatId: string | undefined, ctx: McpCon
 	return chatId;
 }
 
-export async function resolveStory(storyId: string, ctx: McpContext): Promise<UserStoryRow> {
-	const story = await storyQueries.getStoryByIdForUser(storyId, ctx.userId);
-	if (!story) {
-		throw new Error(`Story not found: ${storyId}`);
+export async function resolveStory(storyIdOrShareId: string, ctx: McpContext): Promise<UserStoryRow> {
+	const ownStory = await storyQueries.getStoryByIdForUser(storyIdOrShareId, ctx.userId);
+	if (ownStory) {
+		const storyProjectId = await storyQueries.getStoryProjectId(storyIdOrShareId);
+		if (storyProjectId !== ctx.projectId) {
+			throw new Error(`Story not found: ${storyIdOrShareId}`);
+		}
+		return ownStory;
 	}
-	const storyProjectId = await storyQueries.getStoryProjectId(storyId);
-	if (storyProjectId !== ctx.projectId) {
-		throw new Error(`Story not found: ${storyId}`);
+
+	const sharedStoryId = await sharedStoryQueries.resolveSharedStoryIdForUser(
+		storyIdOrShareId,
+		ctx.userId,
+		ctx.projectId,
+	);
+	if (sharedStoryId) {
+		const sharedStory = await storyQueries.getStoryByIdWithLatestVersion(sharedStoryId);
+		if (sharedStory && sharedStory.projectId === ctx.projectId) {
+			return sharedStory;
+		}
 	}
-	return story;
+
+	throw new Error(`Story not found: ${storyIdOrShareId}`);
 }
 
 export async function fetchLatestStoryVersion(story: UserStoryRow) {

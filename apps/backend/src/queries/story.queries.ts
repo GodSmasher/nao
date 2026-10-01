@@ -84,6 +84,48 @@ export async function getStoryOwnerId(storyId: string): Promise<string | undefin
 	return row?.chatUserId ?? row?.storyUserId ?? undefined;
 }
 
+/**
+ * Fetch a story by UUID with its latest version and no owner filter. The caller is responsible
+ * for its own access check (used after a share grants access to a story the user does not own).
+ */
+export async function getStoryByIdWithLatestVersion(storyId: string): Promise<UserStoryRow | null> {
+	const latestVersions = latestVersionsSubquery();
+
+	const [row] = await db
+		.select({
+			id: s.story.id,
+			chatId: s.story.chatId,
+			projectId: sql<string>`coalesce(${s.story.projectId}, ${s.chat.projectId})`,
+			userId: s.story.userId,
+			slug: s.story.slug,
+			title: s.story.title,
+			isLive: s.story.isLive,
+			isLiveTextDynamic: s.story.isLiveTextDynamic,
+			cacheSchedule: s.story.cacheSchedule,
+			cacheScheduleDescription: s.story.cacheScheduleDescription,
+			archivedAt: s.story.archivedAt,
+			certifiedAt: s.story.certifiedAt,
+			certifiedByName: storyCertifier.name,
+			createdAt: s.story.createdAt,
+			updatedAt: s.story.updatedAt,
+			code: s.storyVersion.code,
+			version: s.storyVersion.version,
+		})
+		.from(s.story)
+		.leftJoin(s.chat, eq(s.story.chatId, s.chat.id))
+		.leftJoin(storyCertifier, eq(s.story.certifiedBy, storyCertifier.id))
+		.innerJoin(latestVersions, eq(s.story.id, latestVersions.storyId))
+		.innerJoin(
+			s.storyVersion,
+			and(eq(s.storyVersion.storyId, s.story.id), eq(s.storyVersion.version, latestVersions.maxVersion)),
+		)
+		.where(eq(s.story.id, storyId))
+		.limit(1)
+		.execute();
+
+	return row ?? null;
+}
+
 export async function getStoryByIdForUser(storyId: string, userId: string): Promise<UserStoryRow | null> {
 	const latestVersions = latestVersionsSubquery();
 
