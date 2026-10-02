@@ -136,6 +136,19 @@ describe('stripReasoningParts', () => {
 		expect(stripped[1]).toBe(messages[1]);
 	});
 
+	it('replaces an already-empty assistant content array with the placeholder so the provider does not reject the request', () => {
+		const messages: ModelMessage[] = [
+			{ role: 'user', content: 'hi' },
+			{ role: 'assistant', content: [] },
+		];
+
+		const stripped = stripReasoningParts(messages);
+		const parts = stripped[1].content as { type: string; text?: string }[];
+
+		expect(parts).toHaveLength(1);
+		expect(parts[0]).toEqual({ type: 'text', text: '[Reasoning omitted]' });
+	});
+
 	it('does not strip reasoning parts from user or tool roles', () => {
 		const messages: ModelMessage[] = [
 			{ role: 'user', content: [{ type: 'text', text: 'q' }] },

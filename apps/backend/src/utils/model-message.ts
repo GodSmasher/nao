@@ -52,7 +52,7 @@ export function stripReasoningParts(messages: ModelMessage[]): ModelMessage[] {
 		}
 		const parts = message.content as { type: string }[];
 		const kept = parts.filter((part) => part.type !== 'reasoning');
-		if (kept.length === parts.length) {
+		if (kept.length === parts.length && parts.length > 0) {
 			return message;
 		}
 		const content = kept.length > 0 ? kept : [{ type: 'text' as const, text: '[Reasoning omitted]' }];
